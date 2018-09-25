@@ -206,13 +206,22 @@ def tasks_create_file(request):
         tags = request.POST.get("tags", None)
         custom = request.POST.get("custom", "")
         memory = bool(request.POST.get("memory", False))
-        clock = request.POST.get("clock", None)
+        clock = request.POST.get("clock", datetime.now().strftime("%m-%d-%Y %H:%M:%S"))
+        if clock is False or clock is None:
+            clock = datetime.now().strftime("%m-%d-%Y %H:%M:%S")
+        if "1970" in clock:
+            clock = datetime.now().strftime("%m-%d-%Y %H:%M:%S")
         enforce_timeout = bool(request.POST.get("enforce_timeout", False))
         gateway = request.POST.get("gateway",None)
         shrike_url = request.POST.get("shrike_url", None)
         shrike_msg = request.POST.get("shrike_msg", None)
         shrike_sid = request.POST.get("shrike_sid", None)
         shrike_refer = request.POST.get("shrike_refer", None)
+        opt_filename = ""
+        for option in options.split(","):
+            if option.startswith("filename="):
+                opt_filename = option.split("filename=")[1]
+                break
 
         task_ids = []
         task_machines = []
@@ -269,8 +278,12 @@ def tasks_create_file(request):
                             "error_value": "File size exceeds API limit"}
                     return jsonize(resp, response=True)
 
-                
-                tmp_path = store_temp_file(sample.read(), sample.name)
+                if opt_filename:
+                    filename = opt_filename
+                else:
+                    filename = sample.name.decode('utf-8', errors="ignore")
+
+                tmp_path = store_temp_file(sample.read(), filename)
                 if pcap:
                     if sample.name.lower().endswith(".saz"):
                         saz = saz_to_pcap(tmp_path)
@@ -279,7 +292,7 @@ def tasks_create_file(request):
                                 os.remove(tmp_path)
                             except:
                                 pass
-                            path = saz  
+                            path = saz
                         else:
                              resp = {"error": True,
                                      "error_value": "Failed to convert SAZ to PCAP"}
@@ -288,8 +301,8 @@ def tasks_create_file(request):
                         path = tmp_path
                     task_id = db.add_pcap(file_path=path)
                     task_ids.append(task_id)
-                    continue 
-            
+                    continue
+
                 if quarantine:
                     path = unquarantine(tmp_path)
                     try:
@@ -323,7 +336,7 @@ def tasks_create_file(request):
                         resp = {"error": True,
                                 "error_value": e}
                         return jsonize(resp, response=True)
-
+                        
                     if task_ids_new:
                         task_ids.extend(task_ids_new)
         else:
@@ -340,7 +353,13 @@ def tasks_create_file(request):
             if len(request.FILES.getlist("file")) > 1:
                 resp["warning"] = ("Multi-file API submissions disabled - "
                                    "Accepting first file")
-            tmp_path = store_temp_file(sample.read(), sample.name)
+
+            if opt_filename:
+                filename = opt_filename
+            else:
+                filename = sample.name.decode('utf-8', errors="ignore")
+
+            tmp_path = store_temp_file(sample.read(), filename)
             if pcap:
                 if sample.name.lower().endswith(".saz"):
                     saz = saz_to_pcap(tmp_path)
@@ -498,7 +517,7 @@ def tasks_create_url(request):
                 if request.POST.get("all_gw_in_group"):
                     tgateway = settings.GATEWAYS[gateway].split(",")
                     for e in tgateway:
-                        task_gateways.append(settings.GATEWAYS[e]) 
+                        task_gateways.append(settings.GATEWAYS[e])
                 else:
                     tgateway = random.choice(settings.GATEWAYS[gateway].split(","))
                     task_gateways.append(settings.GATEWAYS[tgateway])
@@ -532,7 +551,7 @@ def tasks_create_url(request):
                              )
                 if task_id:
                     task_ids.append(task_id)
-                 
+
         if len(task_ids):
             resp["data"] = {}
             resp["data"]["task_ids"] = task_ids
@@ -549,6 +568,33 @@ def tasks_create_url(request):
 
     return jsonize(resp, response=True)
 
+
+def download_file(request, db, task_ids, url, params, headers, service, filename, package, timeout, options, priority, machine, gateway, clock, custom, memory, enforce_timeout, tags, orig_options, task_machines=[]):
+    onesuccess = False
+    try:
+        r = requests.get(url, params=params, headers=headers, verify=False)
+    except requests.exceptions.RequestException as e:
+        return "error", jsonize({"error_value": "Error completing connection to {1}: {0}".format(e, service)}, response=True)
+
+    if r.status_code == 200:
+        try:
+            f = open(filename, 'wb')
+            f.write(r.content)
+            f.close()
+        except:
+            return "error", jsonize({"error": True, "error_value": "Error writing {} download file to temporary path".format(service)}, response=True)
+
+        onesuccess = True
+        for entry in task_machines:
+            task_ids_new = db.demux_sample_and_add_to_db(file_path=filename, package=package, timeout=timeout, options=options, priority=priority,
+                                                             machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags, clock=clock)
+            task_ids.extend(task_ids_new)
+    elif r.status_code == 403:
+        return "error", jsonize({"error": True, "error_value": "API key provided is not a valid {0} key or is not authorized for {0} downloads".format(service)}, response=True)
+    if not onesuccess:
+        return "error", jsonize({"error": True, "error_value": "Provided hash not found on {}".format(service)}, response=True)
+    return "ok", task_ids
+
 # Download a file from VT for analysis
 if apiconf.vtdl.get("enabled"):
     raterps = apiconf.vtdl.get("rps", None)
@@ -558,6 +604,7 @@ if apiconf.vtdl.get("enabled"):
 @ratelimit(key="ip", rate=raterpm, block=rateblock)
 @csrf_exempt
 def tasks_vtdl(request):
+    status = "ok"
     resp = {}
     if request.method == "POST":
         # Check if this API function is enabled
@@ -565,7 +612,7 @@ def tasks_vtdl(request):
             resp = {"error": True,
                     "error_value": "VTDL Create API is Disabled"}
             return jsonize(resp, response=True)
-        
+
         vtdl = request.POST.get("vtdl".strip(),None)
         resp["error"] = False
         # Parse potential POST options (see submission/views.py)
@@ -579,6 +626,12 @@ def tasks_vtdl(request):
         custom = request.POST.get("custom", "")
         memory = bool(request.POST.get("memory", False))
         clock = request.POST.get("clock", None)
+
+        opt_filename = ""
+        for option in options.split(","):
+            if option.startswith("filename="):
+                opt_filename = option.split("filename=")[1]
+                break
 
         task_machines = []
         vm_list = []
@@ -625,46 +678,24 @@ def tasks_vtdl(request):
             if "," in vtdl:
                 hashlist=vtdl.replace(" ", "").strip().split(",")
             else:
-                hashlist=vtdl.split()
-            onesuccess = False
-
+                hashlist.append(vtdl)
             for h in hashlist:
-                filename = base_dir + "/" + h
+                if opt_filename:
+                    filename = base_dir + "/" + opt_filename
+                else:
+                    filename = base_dir + "/" + h
                 if settings.VTDL_PRIV_KEY:
                     url = 'https://www.virustotal.com/vtapi/v2/file/download'
                     params = {'apikey': settings.VTDL_PRIV_KEY, 'hash': h}
                 else:
                     url = 'https://www.virustotal.com/intelligence/download/'
                     params = {'apikey': settings.VTDL_INTEL_KEY, 'hash': h}
-                try:
-                    r = requests.get(url, params=params, verify=True)
-                except requests.exceptions.RequestException as e:
-                    resp = {"error": True, "error_value": "Error completing connection to VirusTotal: {0}".format(e)}
-                    return jsonize(resp, response=True)
-                if r.status_code == 200:
-                    try:
-                        f = open(filename, 'wb')
-                        f.write(r.content)
-                        f.close()
-                    except:
-                        resp = {"error": True, "error_value": "Error writing VirusTotal download file to temporary path"}
-                        return jsonize(resp, response=True)
-
-                    onesuccess = True
-
-                    for entry in task_machines:
-                        task_ids_new = db.demux_sample_and_add_to_db(file_path=filename, package=package, timeout=timeout, options=options, priority=priority,
-                                                                     machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags, clock=clock,
-                                                                     shrike_url=shrike_url, shrike_msg=shrike_msg, shrike_sid=shrike_sid, shrike_refer=shrike_refer)
-                        task_ids.extend(task_ids_new)
-                elif r.status_code == 403:
-                    resp = {"error": True, "error_value": "API key provided is not a valid VirusTotal key or is not authorized for VirusTotal downloads"}
-                    return jsonize(resp, response=True)
-
-            if not onesuccess:
-                resp = {"error": True, "error_value": "Provided hash(s) not found on VirusTotal {0}".format(hashlist)}
-                return jsonize(resp, response=True)
-         
+                headers = {}
+                status, task_ids = download_file(request, db, task_ids, url, params, headers, "VirusTotal", filename, package, timeout, options, priority, machine, gateway, clock, custom, memory, enforce_timeout, tags, options, task_machines)
+                
+        if status == "error":
+            # error
+            return task_ids
         if len(task_ids) > 0:
             resp["data"] = {}
             resp["data"]["task_ids"] = task_ids
@@ -1339,10 +1370,13 @@ def tasks_iocs(request, task_id, detail=None):
     del data["info"]["custom"]
     # The machines key won't exist in cases where an x64 binary is submitted
     # when there are no x64 machines.
-    if "machine" in data["info"] and data["info"]["machine"]:
-        del data["info"]["machine"]["manager"]
-        del data["info"]["machine"]["label"]
-        del data["info"]["machine"]["id"]
+    if "machine" in data["info"] and isinstance(data["info"]["machine"], dict):
+        if data["info"]["machine"].get("manager", ""):
+            del data["info"]["machine"]["manager"]
+        if data["info"]["machine"].get("label", ""):
+            del data["info"]["machine"]["label"]
+        if data["info"]["machine"].get("id"):
+            del data["info"]["machine"]["id"]
     data["signatures"] = []
     # Grab sigs
     for sig in buf["signatures"]:
@@ -1352,8 +1386,10 @@ def tasks_iocs(request, task_id, detail=None):
     if "target" in buf.keys():
         data["target"] = buf["target"]
         if data["target"]["category"] == "file":
-            del data["target"]["file"]["path"]
-            del data["target"]["file"]["guest_paths"]
+            if data["target"]["file"].get("path", ""):
+                del data["target"]["file"]["path"]
+            if data["target"]["file"].get("guest_paths", ""):
+                del data["target"]["file"]["guest_paths"]
     data["network"] = {}
     if "network" in buf.keys() and buf["network"]:
         data["network"]["traffic"] = {}
@@ -1362,9 +1398,9 @@ def tasks_iocs(request, task_id, detail=None):
                 data["network"]["traffic"][netitem + "_count"] = len(buf["network"][netitem])
             else:
                 data["network"]["traffic"][netitem + "_count"] = 0
-        data["network"]["traffic"]["http"] = buf["network"]["http"]
-        data["network"]["hosts"] = buf["network"]["hosts"]
-        data["network"]["domains"] = buf["network"]["domains"]
+        data["network"]["traffic"]["http"] = buf["network"].get("http", [])
+        data["network"]["hosts"] = buf["network"].get("hosts", [])
+        data["network"]["domains"] = buf["network"].get("domains", [])
     data["network"]["ids"] = {}
     if "suricata" in buf.keys() and isinstance(buf["suricata"], dict):
         data["network"]["ids"]["totalalerts"] = len(buf["suricata"]["alerts"])
@@ -1382,11 +1418,11 @@ def tasks_iocs(request, task_id, detail=None):
                 del tmpfile["file_info"]
                 data["network"]["ids"]["files"].append(tmpfile)
     data["static"] = {}
-    if "static" in buf.keys():
+    if "static" in buf.keys() and buf["static"]:
         pe = {}
         pdf = {}
         office = {}
-        if "peid_signatures" in buf["static"] and buf["static"]["peid_signatures"]:
+        if "peid_signatures" in buf.get("static",{}) and buf.get("static", {}).get("peid_signatures", ""):
             pe["peid_signatures"] = buf["static"]["peid_signatures"]
         if "pe_timestamp" in buf["static"] and buf["static"]["pe_timestamp"]:
             pe["pe_timestamp"] = buf["static"]["pe_timestamp"]
@@ -1687,7 +1723,7 @@ if apiconf.rollingsuri.get("enabled"):
 
 @ratelimit(key="ip", rate=raterps, block=rateblock)
 @ratelimit(key="ip", rate=raterpm, block=rateblock)
-    
+
 def tasks_rollingsuri(request, window=60):
     window = int(window)
     if request.method != "GET":
@@ -1704,7 +1740,7 @@ def tasks_rollingsuri(request, window=60):
             resp = {"error": True,
                     "error_value": "The Window You Specified is greater than the configured maximum"}
             return jsonize(resp, response=True)
-         
+
     gen_time = datetime.now() - timedelta(minutes=window)
     dummy_id = ObjectId.from_datetime(gen_time)
     result = list(results_db.analysis.find({"suricata.alerts": {"$exists": True}, "_id": {"$gte": dummy_id}},{"suricata.alerts":1,"info.id":1}))
@@ -1742,9 +1778,9 @@ def tasks_rollingshrike(request, window=60, msgfilter=None):
 
     gen_time = datetime.now() - timedelta(minutes=window)
     dummy_id = ObjectId.from_datetime(gen_time)
-    if msgfilter: 
+    if msgfilter:
        result = results_db.analysis.find({"info.shrike_url": {"$exists": True, "$ne":None }, "_id": {"$gte": dummy_id},"info.shrike_msg": {"$regex" : msgfilter, "$options" : "-1"}},{"info.id":1,"info.shrike_msg":1,"info.shrike_sid":1,"info.shrike_url":1,"info.shrike_refer":1},sort=[("_id", pymongo.DESCENDING)])
-    else:   
+    else:
         result = results_db.analysis.find({"info.shrike_url": {"$exists": True, "$ne":None }, "_id": {"$gte": dummy_id}},{"info.id":1,"info.shrike_msg":1,"info.shrike_sid":1,"info.shrike_url":1,"info.shrike_refer":1},sort=[("_id", pymongo.DESCENDING)])
 
     resp=[]
@@ -2001,6 +2037,19 @@ def cuckoo_status(request):
                 reported=db.count_tasks("reported")
             ),
         )
+    return jsonize(resp, response=True)
+
+
+def tasks_latest(request, hours):
+    if request.method != "GET":
+        resp = {"error": True, "error_value": "Method not allowed"}
+        return jsonize(resp, response=True)
+
+    resp = {}
+    resp["error"] = False
+    timestamp = datetime.now()-timedelta(hours=int(hours))
+    ids = db.list_tasks(completed_after=timestamp)
+    resp["ids"] = [id.to_dict() for id in ids]
     return jsonize(resp, response=True)
 
 def limit_exceeded(request, exception):
