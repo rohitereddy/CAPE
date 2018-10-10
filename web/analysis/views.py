@@ -886,7 +886,7 @@ def file(request, category, task_id, dlfile):
     if category == "sample":
         path = os.path.join(CUCKOO_ROOT, "storage", "binaries", dlfile)
         #file_name += ".bin"
-    elif category in ("samplezip", "droppedzip", "CAPE", "CAPEZIP"):
+    elif category in ("samplezip", "droppedzip", "CAPE", "CAPEZIP", "procdump", "procdumpzip"):
         # ability to download password protected zip archives
         path = ""
         if category == "samplezip":
