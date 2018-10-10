@@ -906,8 +906,20 @@ def file(request, category, task_id, dlfile):
             else:
                 path = buf
                 #file_name += ".bin"
+        elif category.startswith("procdump"):
+            buf = os.path.join(CUCKOO_ROOT, "storage", "analyses", task_id, "procdump", file_name)
+            if os.path.isdir(buf):
+                # Backward compat for when each dropped file was in a separate dir
+                # Grab smaller file name as we store guest paths in the
+                # [orig file name]_info.exe
+                dfile = min(os.listdir(buf), key=len)
+                path = os.path.join(buf, dfile)
+                #file_name = dfile + ".bin"
+            else:
+                path = buf
+                #file_name += ".bin"
         TMPDIR = "/tmp"
-        if path and category in ("droppedzip", "CAPEZIP"):
+        if path and category in ("droppedzip", "CAPEZIP", "procdumpzip"):
             try:
                 cmd = ["7z", "a", "-y", "-pinfected", os.path.join(TMPDIR, file_name + ".zip"), path]
                 output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
@@ -954,19 +966,6 @@ def file(request, category, task_id, dlfile):
         else:
             path = buf
             #file_name += ".bin"            
-    elif category == "procdump":
-        buf = os.path.join(CUCKOO_ROOT, "storage", "analyses",
-                           task_id, "procdump", file_name)
-        if os.path.isdir(buf):
-            # Backward compat for when each dropped file was in a separate dir
-            # Grab smaller file name as we store guest paths in the
-            # [orig file name]_info.exe
-            dfile = min(os.listdir(buf), key=len)
-            path = os.path.join(buf, dfile)
-            #file_name = dfile + ".bin"
-        else:
-            path = buf
-            #file_name += ".bin"
     # Just for suricata dropped files currently
     elif category == "zip":
         file_name = "files.zip"

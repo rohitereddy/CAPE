@@ -92,6 +92,7 @@
                     <th></th>
                     <td>
                         <a href="{% url "file" "procdump" analysis.info.id file.sha256 %}" class="btn btn-primary btn-small">Download</a>
+                        <a href="{% url "file" "procdumpzip" analysis.info.id file.sha256 %}" class="btn btn-primary btn-small">Download</a>
                     </td>
                 </tr>
                 {% endif %}
